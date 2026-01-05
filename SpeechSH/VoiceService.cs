@@ -1,7 +1,11 @@
 ﻿using NAudio.Wave;
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Speech.Synthesis;
+using System.Threading;
+using System.Threading.Tasks;
 using Vosk;
 
 namespace SpeechSH
@@ -15,23 +19,22 @@ namespace SpeechSH
         private VoskRecognizer _rec;
         private TtsService _tts = new TtsService();
         private bool _wakeDetected = false;
-
         private MQTT _MQTT;
-
-        private const string WAKE_WORD = "my name";
+        private string[] WAKE_WORD = { "hi baby", "hey baby", "my baby" };
 
         public VoiceService(Action<string> log)
         {
             _log = log;
         }
 
-        public void Start()
+        #region Vosk
+        public void StartVosk()
         {
             _log("VoiceService Start");
 
             Vosk.Vosk.SetLogLevel(0);
-            //_model = new Model("vosk-model-small-en-us-0.15");
-            _model = new Model("vosk-model-vn-0.4");
+            _model = new Model("vosk-model-small-en-us-0.15");
+            //_model = new Model("vosk-model-vn-0.4");
             _rec = new VoskRecognizer(_model, 16000);
             _rec.SetWords(true);
 
@@ -46,12 +49,19 @@ namespace SpeechSH
             _waveIn.StartRecording();
 
             _log("Recording started");
-
-
+        }
+        public void Dispose()
+        {
+            _waveIn?.StopRecording();
+            _waveIn?.Dispose();
+            _rec?.Dispose();
+            _model?.Dispose();
+        }
+        public void StartMQTT()
+        {
             _MQTT = new MQTT(_log);
             _MQTT.ConnectMqtt();
         }
-
         private void OnData(object sender, WaveInEventArgs e)
         {
             if (_rec.AcceptWaveform(e.Buffer, e.BytesRecorded))
@@ -65,7 +75,6 @@ namespace SpeechSH
                 //_log("Bytes: " + e.BytesRecorded);
             }
         }
-
         private void HandleText(string json)
         {
             var text = ExtractText(json);
@@ -76,11 +85,11 @@ namespace SpeechSH
 
             if (!_wakeDetected)
             {
-                if (text.Contains(WAKE_WORD))
+                if (WAKE_WORD.Any(w=> text.Contains(w)))
                 {
                     _wakeDetected = true;
-                    _log("Yes sir");
-                    _tts.Speak("Yes sir");
+                    _log("I'm here");
+                    _tts.Speak("I'm here");
                 }
                 return;
             }
@@ -91,7 +100,6 @@ namespace SpeechSH
             _log("Command: " + text);
             _wakeDetected = false;
         }
-        
         private string ExtractText(string json)
         {
             var key = "\"text\" : \"";
@@ -126,19 +134,87 @@ namespace SpeechSH
             }
             throw new Exception("No microphone found");
         }
+        #endregion
 
-        public void Stop()
+        #region whisper
+
+        WaveInEvent waveIn;
+        WaveFileWriter writer;
+        public bool recordDone;
+        public void StartRecord()
         {
-            _waveIn?.StopRecording();
+            recordDone = false;
+            waveIn = new WaveInEvent();
+            waveIn.DeviceNumber = 0;
+            waveIn.WaveFormat = new WaveFormat(16000, 1); // 16kHz mono
+            waveIn.DataAvailable += (s, a) =>
+            {
+                writer.Write(a.Buffer, 0, a.BytesRecorded);
+            };
+            waveIn.RecordingStopped += (s, a) =>
+            {
+                writer.Dispose();
+                waveIn.Dispose();
+                recordDone = true;
+            };
+
+            writer = new WaveFileWriter(@"D:\Whisper\voice.wav", waveIn.WaveFormat);
+            waveIn.StartRecording();
         }
 
-        public void Dispose()
+        public void StopRecord()
         {
-            _waveIn?.Dispose();
-            _rec?.Dispose();
-            _model?.Dispose();
+            waveIn.StopRecording();
         }
 
+        public string RunWhisper()
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = @"D:\Whisper\whisper-cli.exe",
+                Arguments = "-m models\\ggml-small.bin -f voice.wav -l vi -otxt",
+                WorkingDirectory = @"D:\Whisper",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            File.Delete("D:\\Whisper\\voice.wav.txt");
+            var p = Process.Start(psi);
+            p.WaitForExit();
+            Thread.Sleep(1000);
+            if (File.Exists("D:\\Whisper\\voice.wav.txt") == false)
+            {
+                return "";
+            }
+            else
+            { return File.ReadAllText("D:\\Whisper\\voice.wav.txt"); }
+        }
+
+        public void HandleText2(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            _log("Heard: " + text);
+
+            if (!_wakeDetected)
+            {
+                if (WAKE_WORD.Any(w => text.Contains(w)))
+                {
+                    _wakeDetected = true;
+                    _log("I'm here");
+                    _tts.Speak("I'm here");
+                }
+                return;
+            }
+
+            // xử lý lệnh sau wake
+            _MQTT.SendRelayCommand(0, true);
+
+            _log("Command: " + text);
+            _wakeDetected = false;
+        }
+        #endregion
 
         public class TtsService
         {
