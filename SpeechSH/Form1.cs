@@ -39,7 +39,7 @@ namespace SpeechSH
 
                 _voice = new VoiceService(Log);
                 _voice.StartMQTT();
-                //_voice.Start();
+                _voice.StartVosk();
 
             }
             catch (Exception ex)
@@ -59,26 +59,6 @@ namespace SpeechSH
             txtLog.AppendText(
                 $"[{DateTime.Now:HH:mm:ss}] {msg}\r\n"
             );
-        }
-
-        private void btnStartRecord_Click(object sender, EventArgs e)
-        {
-            btnStartRecord.Enabled = false;
-            Log("Start Recording...");
-            _voice.StartRecord();
-            Thread.Sleep(4000);
-            _voice.StopRecord();
-            while(true)
-            {
-                if (_voice.recordDone)
-                    break;
-                Application.DoEvents();
-                Thread.Sleep(5);
-            }    
-            string text = _voice.RunWhisper();
-            _voice.HandleText2(text);
-
-            btnStartRecord.Enabled = true;
         }
     }
 }

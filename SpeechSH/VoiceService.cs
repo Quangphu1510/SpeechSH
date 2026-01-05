@@ -20,11 +20,16 @@ namespace SpeechSH
         private TtsService _tts = new TtsService();
         private bool _wakeDetected = false;
         private MQTT _MQTT;
-        private string[] WAKE_WORD = { "hi baby", "hey baby", "my baby" };
+        private string[] WAKE_WORD = { "hi baby", "hey baby", "my baby","xin chào"};
 
         public VoiceService(Action<string> log)
         {
             _log = log;
+        }
+        public void StartMQTT()
+        {
+            _MQTT = new MQTT(_log);
+            _MQTT.ConnectMqtt();
         }
 
         #region Vosk
@@ -38,6 +43,10 @@ namespace SpeechSH
             _rec = new VoskRecognizer(_model, 16000);
             _rec.SetWords(true);
 
+            StartRecordVosk();
+        }
+        private void StartRecordVosk()
+        {
             _waveIn = new WaveInEvent
             {
                 DeviceNumber = GetSafeMicIndex(),
@@ -50,6 +59,11 @@ namespace SpeechSH
 
             _log("Recording started");
         }
+        private void StopRecordVosk()
+        {
+            _waveIn?.StopRecording();
+            //_log("Recording stopped");
+        }
         public void Dispose()
         {
             _waveIn?.StopRecording();
@@ -57,22 +71,11 @@ namespace SpeechSH
             _rec?.Dispose();
             _model?.Dispose();
         }
-        public void StartMQTT()
-        {
-            _MQTT = new MQTT(_log);
-            _MQTT.ConnectMqtt();
-        }
         private void OnData(object sender, WaveInEventArgs e)
         {
             if (_rec.AcceptWaveform(e.Buffer, e.BytesRecorded))
             {
                 HandleText(_rec.Result());
-                //_log("Bytes: " + e.BytesRecorded);
-            }
-            else
-            {
-                //HandlePartial(_rec.PartialResult());
-                //_log("Bytes: " + e.BytesRecorded);
             }
         }
         private void HandleText(string json)
@@ -88,17 +91,13 @@ namespace SpeechSH
                 if (WAKE_WORD.Any(w=> text.Contains(w)))
                 {
                     _wakeDetected = true;
+                    StopRecordVosk();
                     _log("I'm here");
                     _tts.Speak("I'm here");
+                    Thread.Sleep(500);
+                    CallWhisper();
                 }
-                return;
             }
-
-            // xử lý lệnh sau wake
-            _MQTT.SendRelayCommand(0, true);
-
-            _log("Command: " + text);
-            _wakeDetected = false;
         }
         private string ExtractText(string json)
         {
@@ -106,21 +105,6 @@ namespace SpeechSH
             var i = json.IndexOf(key);
             if (i < 0) return null;
             i += key.Length;
-            var j = json.IndexOf("\"", i);
-            return json.Substring(i, j - i);
-        }
-        private void HandlePartial(string json)
-        {
-            var text = Extract(json, "partial");
-            if (!string.IsNullOrEmpty(text))
-                _log("~ " + text);
-        }
-        private string Extract(string json, string key)
-        {
-            var k = $"\"{key}\" : \"";
-            var i = json.IndexOf(k);
-            if (i < 0) return null;
-            i += k.Length;
             var j = json.IndexOf("\"", i);
             return json.Substring(i, j - i);
         }
@@ -134,14 +118,40 @@ namespace SpeechSH
             }
             throw new Exception("No microphone found");
         }
+
+        private void CallWhisper()
+        {
+            Task.Run(() =>
+            {
+                _log("Starting Whisper...");
+                StartRecord();
+                Thread.Sleep(5000); // record 5 seconds
+                StopRecord();
+                while (!recordDone)
+                {
+                    Thread.Sleep(10);
+                }
+                string result = RunWhisper();
+                if (string.IsNullOrEmpty(result))
+                {
+                    CallWhisper();
+                }
+                else
+                {
+                    HandleText2(result);
+                    StartRecordVosk();
+                    _wakeDetected = false;
+                }
+            });
+        }
         #endregion
 
         #region whisper
 
         WaveInEvent waveIn;
         WaveFileWriter writer;
-        public bool recordDone;
-        public void StartRecord()
+        private bool recordDone;
+        private void StartRecord()
         {
             recordDone = false;
             waveIn = new WaveInEvent();
@@ -162,12 +172,12 @@ namespace SpeechSH
             waveIn.StartRecording();
         }
 
-        public void StopRecord()
+        private void StopRecord()
         {
             waveIn.StopRecording();
         }
 
-        public string RunWhisper()
+        private string RunWhisper()
         {
             var psi = new ProcessStartInfo
             {
@@ -181,7 +191,6 @@ namespace SpeechSH
             File.Delete("D:\\Whisper\\voice.wav.txt");
             var p = Process.Start(psi);
             p.WaitForExit();
-            Thread.Sleep(1000);
             if (File.Exists("D:\\Whisper\\voice.wav.txt") == false)
             {
                 return "";
@@ -190,29 +199,16 @@ namespace SpeechSH
             { return File.ReadAllText("D:\\Whisper\\voice.wav.txt"); }
         }
 
-        public void HandleText2(string text)
+        private void HandleText2(string text)
         {
             if (string.IsNullOrEmpty(text))
                 return;
 
-            _log("Heard: " + text);
+            text = text.ToLower().Trim();
 
-            if (!_wakeDetected)
-            {
-                if (WAKE_WORD.Any(w => text.Contains(w)))
-                {
-                    _wakeDetected = true;
-                    _log("I'm here");
-                    _tts.Speak("I'm here");
-                }
-                return;
-            }
 
-            // xử lý lệnh sau wake
             _MQTT.SendRelayCommand(0, true);
-
             _log("Command: " + text);
-            _wakeDetected = false;
         }
         #endregion
 
